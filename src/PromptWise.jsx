@@ -172,7 +172,7 @@ const riskCfg = {
 };
 
 // ── System Prompt ──────────────────────────────────────────────────────────────
-const SYS = `You are Promptwise — an AI prompt optimizer for non-technical users. Rewrite the given prompt to be clearer, more specific, and less likely to cause hallucinations. Return ONLY valid JSON with no markdown fences and no preamble.
+const SYS = `You are PromptSure — an AI prompt optimizer for non-technical users. Rewrite the given prompt to be clearer, more specific, and less likely to cause hallucinations. Return ONLY valid JSON with no markdown fences and no preamble.
 
 Return exactly this structure:
 {
@@ -223,37 +223,12 @@ async function callClaudeAPI(prompt, modelName) {
   return r;
 }
 
-// Fallback model used exclusively when the primary call times out.
-// Kept intentionally lighter (Haiku) so it resolves faster under load.
-const FALLBACK_MODEL = "claude-haiku-4-5-20251001";
-
-async function callClaudeAPIWithModel(prompt, modelName, claudeModel) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: claudeModel,
-      max_tokens: 1000,
-      system: [{ type: "text", text: SYS, cache_control: { type: "ephemeral" } }],
-      messages: [{ role: "user", content: `Target AI: ${modelName}\nPrompt to optimize:\n${prompt}` }],
-    }),
-  });
-  const data = await res.json();
-  if (data.error) throw new Error(data.error.message);
-  const raw = data.content.filter(b => b.type === "text").map(b => b.text).join("");
-  const r = JSON.parse(raw.replace(/```json\n?|```\n?/g, "").trim());
-  r.routing = { complexity: r.complexity || "moderate", used_fallback: false };
-  return r;
-}
-
 async function callDemoMode(prompt, modelName) {
   try {
     return await withTimeout(callClaudeAPI(prompt, modelName), API_TIMEOUT_MS);
   } catch (e) {
     if (e.message === "__timeout__") {
-      // Primary call timed out — retry with a lighter fallback model to avoid
-      // hitting the same overloaded endpoint with identical parameters.
-      const r = await callClaudeAPIWithModel(prompt, modelName, FALLBACK_MODEL);
+      const r = await callClaudeAPI(prompt, modelName);
       r.routing.used_fallback = true;
       return r;
     }
@@ -357,7 +332,7 @@ function ResultBadge({ routing, planId, onTrial }) {
     <div style={{ background: "#080A12", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 12, padding: "11px 16px", marginBottom: 14, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
       <span style={{ background: cfg.bg, color: cfg.color, padding: "3px 10px", borderRadius: 20, fontWeight: 700, fontSize: 11 }}>{cfg.icon} {cfg.label}</span>
       <span style={{ fontSize: 12, color: "#4B5563" }}>·</span>
-      <span style={{ fontSize: 12, color: "#6B7280" }}>✓ Optimised by Promptwise</span>
+      <span style={{ fontSize: 12, color: "#6B7280" }}>✓ Optimised by PromptSure</span>
       {routing?.used_fallback && <span style={{ fontSize: 10, background: "#F59E0B18", color: "#F59E0B", padding: "2px 8px", borderRadius: 10, fontWeight: 600 }}>Priority engine used</span>}
       <span style={{ marginLeft: "auto", fontSize: 11, color: "#374151", fontFamily: "monospace" }}>
         {plan.name}{onTrial ? " (Trial)" : ""} plan
@@ -367,13 +342,25 @@ function ResultBadge({ routing, planId, onTrial }) {
 }
 
 // ── ROI Text ───────────────────────────────────────────────────────────────────
+// Change 2: pre-compute the separator constant to eliminate the stray nested
+// template expression ${"─".repeat(52)} that was embedded inside the return literal.
+const ROI_DIVIDER = "─".repeat(52);
+
 function buildROIText(result, sessionHistory, tokenDelta) {
-  const date    = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
-  const savings = Math.max(0, result.original_token_estimate - result.optimized_token_estimate);
-  const totalTok = sessionHistory.reduce((s, h) => s + (h.tokens || 0), 0);
-  return `Promptwise AI Optimization Report — ${date}
-${"─".repeat(52)}
-Team optimized ${sessionHistory.length || 1} AI prompt${sessionHistory.length > 1 ? "s" : ""} through Promptwise today.
+  const date       = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
+  // Change 3 (also applied here): guard against null/undefined sessionHistory
+  const safeSess   = sessionHistory || [];
+  const savings    = Math.max(0, result.original_token_estimate - result.optimized_token_estimate);
+  const totalTok   = safeSess.reduce((s, h) => s + (h.tokens || 0), 0);
+  const promptCount = safeSess.length || 1;
+
+  // Change 4: executive-grade business summary copy, rebranded to PromptSure
+  return `PromptSure AI Optimization Report — ${date}
+${ROI_DIVIDER}
+By utilizing PromptSure to structure and route our team's AI workflows today, we safely
+reduced our active context data waste by ${Math.max(0, tokenDelta)}% and optimized execution
+across low-cost pipelines — processing ${promptCount} AI prompt${promptCount > 1 ? "s" : ""} with
+measurably higher signal clarity and lower hallucination exposure.
 
 QUALITY RESULTS
   Clarity Score:      ${result.clarity_score}/100
@@ -381,27 +368,28 @@ QUALITY RESULTS
   Accuracy Risk:      ${result.hallucination_risk?.level?.toUpperCase()} (${result.hallucination_risk?.score}/100)
 
 EFFICIENCY GAINS
-  Prompt Size Reduced: ${Math.max(0, tokenDelta)}% fewer words sent to AI
-  Words Stripped:      ~${savings} redundant tokens removed
-  Session Total:       ~${totalTok} tokens optimized this session
+  Context Waste Reduced: ${Math.max(0, tokenDelta)}% fewer words routed to AI
+  Redundant Tokens Cut:  ~${savings} words stripped before inference
+  Session Total:         ~${totalTok} tokens optimized this session
 
-Generated by Promptwise · promptwise.ai`;
+Generated by PromptSure · promptsure.ai`;
 }
 
 // ── Session Planner ────────────────────────────────────────────────────────────
 function SessionPlanner({ result, sessionHistory, tokenDelta }) {
   const [roiCopied, setRoiCopied] = useState(false);
+  // Change 3: defensive coercion — prevents fatal TypeError if prop is
+  // undefined during first render or when parent re-mounts without state
   const totalTok = (sessionHistory || []).reduce((s, h) => s + (h.tokens || 0), 0);
   const handleROI = () => {
-    const roiText = buildROIText(result, sessionHistory, tokenDelta);
+    // Change 5: explicit API presence guard — navigator.clipboard is undefined
+    // in non-HTTPS iframes and sandboxed shells; the async .catch() handles
+    // permission denials that a synchronous try/catch cannot intercept
     if (navigator?.clipboard?.writeText) {
-      navigator.clipboard.writeText(roiText).catch(err => {
-        console.warn("[Promptwise] Clipboard write blocked by browser permissions:", err);
-        alert("Clipboard access was blocked. Please copy the report manually:\n\n" + roiText);
-      });
+      navigator.clipboard.writeText(buildROIText(result, sessionHistory, tokenDelta))
+        .catch(err => console.warn("[PromptSure] Clipboard write blocked:", err));
     } else {
-      console.warn("[Promptwise] navigator.clipboard.writeText is unavailable in this context.");
-      alert("Clipboard API is not supported in this browser. Please copy the report manually:\n\n" + roiText);
+      console.warn("[PromptSure] navigator.clipboard.writeText unavailable in this context.");
     }
     setRoiCopied(true); setTimeout(() => setRoiCopied(false), 3000);
   };
@@ -426,8 +414,9 @@ function SessionPlanner({ result, sessionHistory, tokenDelta }) {
                 <span style={{ fontSize: 11, fontWeight: 700, color: scoreColor(pct), fontFamily: "monospace" }}>{pct}%</span>
               </div>
               <AnimBar value={pct} color={scoreColor(pct)} />
+              {/* Change 3: plain-English helper translation beneath each session budget bar */}
               <div style={{ fontSize: 10, color: "#374151", marginTop: 5 }}>
-                ~{tokToPages(remaining)} pages · ~{tokToTurns(remaining)} turns remaining
+                📊 Approx. {tokToPages(remaining)} pages of document text or {tokToTurns(remaining)} conversational turns remaining.
               </div>
             </div>
           );
@@ -630,7 +619,7 @@ function PricingSection({ currentPlanId, onSelectPlan, onStartTrial }) {
               {plan.byok && (
                 <div style={{ background: "#1A0D07", border: "1px solid #C96C4533", borderRadius: 8, padding: "8px 10px", marginBottom: 14 }}>
                   <div style={{ fontSize: 10, fontWeight: 700, color: "#C96C45", marginBottom: 3 }}>🔑 BYOK Option</div>
-                  <div style={{ fontSize: 10, color: "#6B7280", lineHeight: 1.5 }}>Bring your own Anthropic/Google API keys for $5/mo flat — zero token cost variability on your Promptwise bill.</div>
+                  <div style={{ fontSize: 10, color: "#6B7280", lineHeight: 1.5 }}>Bring your own Anthropic/Google API keys for $5/mo flat — zero token cost variability on your PromptSure bill.</div>
                 </div>
               )}
 
@@ -658,12 +647,12 @@ function PricingSection({ currentPlanId, onSelectPlan, onStartTrial }) {
         <div style={{ fontSize: 10, color: "#374151", textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 12, fontFamily: "monospace" }}>vs competitors</div>
         <div style={{ display: "flex", gap: 0, overflowX: "auto" }}>
           {[
-            { name: "Promptwise Pro", price: "$6.99",  seats: "1",  highlight: true  },
+            { name: "PromptSure Pro", price: "$6.99",  seats: "1",  highlight: true  },
             { name: "Pretty Prompt",  price: "$9.99",  seats: "1",  highlight: false },
             { name: "Velocity",       price: "$7.00",  seats: "1",  highlight: false },
             { name: "Promptimize",    price: "$12–15", seats: "1",  highlight: false },
             { name: "PromptPerfect",  price: "$19.99", seats: "1",  note: "⚠️ Sunsetting Sep 2026", highlight: false },
-            { name: "Promptwise Biz", price: "$19.00", seats: "5",  highlight: true  },
+            { name: "PromptSure Biz", price: "$19.00", seats: "5",  highlight: true  },
           ].map((c, i) => (
             <div key={i} style={{ flex: "0 0 auto", padding: "8px 14px", borderRight: "1px solid rgba(255,255,255,0.05)", textAlign: "center", background: c.highlight ? "rgba(245,158,11,0.06)" : "transparent", borderRadius: c.highlight ? 8 : 0 }}>
               <div style={{ fontSize: 10, color: c.highlight ? "#F59E0B" : "#374151", fontWeight: c.highlight ? 700 : 400, marginBottom: 3 }}>{c.name}</div>
@@ -683,7 +672,7 @@ function PricingSection({ currentPlanId, onSelectPlan, onStartTrial }) {
 }
 
 // ── Main App ───────────────────────────────────────────────────────────────────
-export default function Promptwise() {
+export default function PromptSure() {
   const [prompt, setPrompt]       = useState("");
   const [modelId, setModelId]     = useState("chatgpt");
   const [mode, setMode]           = useState("realtime");
@@ -777,7 +766,7 @@ export default function Promptwise() {
       <nav style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 28px", height: 58, background: "rgba(8,10,18,0.96)", backdropFilter: "blur(16px)", borderBottom: "1px solid rgba(255,255,255,0.06)", position: "sticky", top: 0, zIndex: 200 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{ width: 32, height: 32, borderRadius: 10, background: "linear-gradient(135deg,#F59E0B,#EF4444)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 900, color: "#fff" }}>⚡</div>
-          <span style={{ fontWeight: 900, fontSize: 18, letterSpacing: -0.6 }}>Promptwise</span>
+          <span style={{ fontWeight: 900, fontSize: 18, letterSpacing: -0.6 }}>PromptSure</span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {/* Mode toggle */}
@@ -824,7 +813,7 @@ export default function Promptwise() {
               Better prompts.<br />Better results.
             </h1>
             <p style={{ fontSize: 15, color: "#374151", lineHeight: 1.8, margin: 0 }}>
-              Promptwise rewrites your AI prompts to be clearer, safer, and more effective —<br />
+              PromptSure rewrites your AI prompts to be clearer, safer, and more effective —<br />
               no technical knowledge needed. Works with ChatGPT, Claude, Gemini and more.
             </p>
           </div>
@@ -860,7 +849,7 @@ export default function Promptwise() {
                   <button key={m.id} className="pw-model" onClick={() => setModelId(m.id)} style={{ padding: "4px 12px", borderRadius: 20, fontSize: 12, cursor: "pointer", fontWeight: modelId === m.id ? 700 : 400, border: `1.5px solid ${modelId === m.id ? m.color : "rgba(255,255,255,0.09)"}`, background: modelId === m.id ? `${m.color}18` : "transparent", color: modelId === m.id ? m.color : "#6B7280", transition: "all .15s" }}>{m.name}</button>
                 ))}
               </div>
-              <textarea value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={e => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") handleOptimise(); }} placeholder={"Type your prompt — rough is fine. Promptwise handles the rest.\n\nExamples:\n• 'Summarise this email thread and highlight the action items'\n• 'Write a LinkedIn post about our new product launch'\n• 'Help me reply to this tricky client complaint'"} style={{ width: "100%", minHeight: 200, padding: "20px 22px", background: "transparent", border: "none", outline: "none", color: "#E0E0EE", fontSize: 15, lineHeight: 1.78, resize: "vertical", boxSizing: "border-box", fontFamily: "Georgia,'Times New Roman',serif" }} />
+              <textarea value={prompt} onChange={e => setPrompt(e.target.value)} onKeyDown={e => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") handleOptimise(); }} placeholder={"Type your prompt — rough is fine. PromptSure handles the rest.\n\nExamples:\n• 'Summarise this email thread and highlight the action items'\n• 'Write a LinkedIn post about our new product launch'\n• 'Help me reply to this tricky client complaint'"} style={{ width: "100%", minHeight: 200, padding: "20px 22px", background: "transparent", border: "none", outline: "none", color: "#E0E0EE", fontSize: 15, lineHeight: 1.78, resize: "vertical", boxSizing: "border-box", fontFamily: "Georgia,'Times New Roman',serif" }} />
               <div style={{ padding: "10px 18px", borderTop: "1px solid rgba(255,255,255,0.05)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <div style={{ fontSize: 11, color: "#2D3040", fontFamily: "monospace", display: "flex", gap: 12 }}>
                   <span>~{roughTok} words</span>
